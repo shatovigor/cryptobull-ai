@@ -1,0 +1,70 @@
+﻿# === Секреты ===
+.env
+.env.*
+!.env.example
+private.pem
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# === Данные бота ===
+bot.log
+bot.log.old
+trades.log
+trade_history.json
+bot_state.json
+auto_daily.json
+auto_scan_state.json
+aml_buffer.json
+coin_management.json
+signals_log.json
+signals.log
+defaults.json
+daily_reports.json
+equity_history.json
+
+# === Модели ML ===
+storage/models/
+models/
+*.pkl
+*.pickle
+
+# === Базы данных ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === Бэкапы ===
+backup_*.json
+backups_*/
+backups_*_*/
+gui_auto_backup*.py
+
+# === Одноразовые скрипты ===
+_diag.py
+apply_*_patch.py
+check_*.py
+fix_*.py
+restore_*.py
+smoke_test.py
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Отчёты ===
+outputs/
+logs/
+evaluation_output/

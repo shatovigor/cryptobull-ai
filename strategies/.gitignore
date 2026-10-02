@@ -1,0 +1,52 @@
+# === Секреты ===
+.env
+.env.*
+!.env.example
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# === Данные бота (не коммитим) ===
+bot.log
+bot.log.old
+trades.log
+trade_history.json
+bot_state.json
+auto_daily.json
+auto_scan_state.json
+aml_buffer.json
+coin_management.json
+signals_log.json
+defaults.json
+
+# === Модели ML (большие файлы) ===
+storage/models/
+models/
+*.pkl
+*.pickle
+
+# === Базы данных ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Отчёты и выводы ===
+outputs/
+logs/
+evaluation_output/
