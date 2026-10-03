@@ -1,13 +1,15 @@
 """
 Автобот с адаптивным размером, стопом по ATR, пирамидингом, хеджем, MTF.
-Логирует все сигналы (сработавшие и несработавшие) для анализа.
-Добавлен 4h-фильтр тренда для отсечения запоздалых входов.
-
 Стратегия вынесена в strategies/ — переключается через config.ACTIVE_STRATEGY.
+
+ДОБАВЛЕНО:
+  - Адаптивный Trailing по ATR (через trailing_manager.py).
+  - Автоподбор монет под текущий депозит (_deposit_auto_scan_coins).
 """
 import time
 import json
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
@@ -72,24 +74,24 @@ class AutoTrader:
         self.log_file = 'bot.log'
         self.max_log_size = 5 * 1024 * 1024
 
-                # ==== AML: общий буфер обучения ====
         self._aml_shared_buffer = []
         self._aml_shared_buffer_file = 'aml_buffer.json'
         self._load_aml_buffer()
 
-        # ==== СТРАТЕГИЯ ====
         self.strategy = get_strategy(
             getattr(config, 'ACTIVE_STRATEGY', 'classic_levels'),
             self.trader,
             self._log,
         )
-        # Для adaptive_ml: features на момент входа
         self._last_features_by_symbol = {}
 
+        # ==== TRAILING ====
         self.trailing = None
         if TRAILING_AVAILABLE and getattr(config, 'USE_TRAILING_STOP', False):
             self.trailing = TrailingManager(self, self._log)
-            print("📈 Trailing: ВКЛЮЧЁН")
+            print("📈 Trailing: ВКЛЮЧЁН (адаптивный по ATR)"
+                  if getattr(config, 'USE_TRAILING_ATR', True)
+                  else "📈 Trailing: ВКЛЮЧЁН")
         else:
             print("📈 Trailing: ОТКЛЮЧЁН")
 
@@ -101,7 +103,7 @@ class AutoTrader:
         if SIGNAL_LOG_AVAILABLE:
             print("📝 Логирование сигналов: ВКЛЮЧЕНО")
         else:
-            print("📝 Логирование сигналов: ОТКЛЮЧЕНО (нет signal_logger.py)")
+            print("📝 Логирование сигналов: ОТКЛЮЧЕНО")
 
         print(f"🎯 Стратегия: {self.strategy.display_name}")
 
@@ -109,7 +111,6 @@ class AutoTrader:
     # СМЕНА СТРАТЕГИИ
     # ============================================================
     def set_strategy(self, name: str):
-        """Переключить стратегию. Бот должен быть остановлен."""
         if self.is_running:
             self._log("⚠ Нельзя менять стратегию на ходу. Останови бота.", "#ff9800")
             return False
@@ -117,7 +118,6 @@ class AutoTrader:
             self.strategy = get_strategy(name, self.trader, self._log)
             config.ACTIVE_STRATEGY = name
 
-            # Если включили AML — заливаем ей общий буфер
             if name == 'adaptive_ml' and hasattr(self.strategy, 'buffer'):
                 for item in self._aml_shared_buffer:
                     feat = item.get('features')
@@ -126,10 +126,9 @@ class AutoTrader:
                         self.strategy.buffer.append((feat, label))
                 if self.strategy.buffer:
                     self._log(
-                        f"🧠 AML: подгружено {len(self.strategy.buffer)} сэмплов из общего буфера",
+                        f"🧠 AML: подгружено {len(self.strategy.buffer)} сэмплов",
                         "#7C4DFF"
                     )
-                    # если набралось достаточно — сразу обучаем
                     if len(self.strategy.buffer) >= self.strategy.update_interval:
                         self.strategy._partial_fit()
 
@@ -140,10 +139,13 @@ class AutoTrader:
             return False
 
     # ============================================================
-    # АВТОСКАН МОНЕТ
+    # АВТОСКАН (старый, по рынку)
     # ============================================================
     def _auto_scan_coins(self):
         if not getattr(config, 'SCANNER_AUTO_ENABLED', False):
+            return
+        # Если включён автоподбор под депозит — не запускаем рыночный автоскан
+        if getattr(config, 'DEPOSIT_AUTO_SCAN_ENABLED', False):
             return
 
         hours = getattr(config, 'SCANNER_AUTO_HOURS', 24)
@@ -209,6 +211,121 @@ class AutoTrader:
             self._log(f"⚠ Автоскан: {str(e)[:80]}", "#ff9800")
 
     # ============================================================
+    # АВТОПОДБОР ПОД ДЕПОЗИТ
+    # ============================================================
+    def _deposit_auto_scan_coins(self, free_balance):
+        """
+        Пересчитывает AUTO_SYMBOLS под текущий free_balance.
+        Запускается раз в DEPOSIT_AUTO_SCAN_HOURS ИЛИ при изменении баланса > 20%.
+        """
+        if not getattr(config, 'DEPOSIT_AUTO_SCAN_ENABLED', False):
+            return
+
+        if free_balance <= 0:
+            return
+
+        hours = getattr(config, 'DEPOSIT_AUTO_SCAN_HOURS', 1)
+        state_file = 'deposit_scan_state.json'
+
+        try:
+            last_scan = None
+            last_balance = 0.0
+            if os.path.exists(state_file):
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    d = json.load(f)
+                last_scan = d.get('last_scan')
+                last_balance = float(d.get('balance', 0) or 0)
+
+            if last_scan:
+                try:
+                    last_dt = datetime.fromisoformat(last_scan)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    delta = datetime.now(timezone.utc) - last_dt
+
+                    # Пересчёт если прошло N часов ИЛИ баланс изменился > 20%
+                    balance_changed = False
+                    if last_balance > 0:
+                        diff_pct = abs(free_balance - last_balance) / last_balance * 100
+                        if diff_pct > 20:
+                            balance_changed = True
+
+                    if delta < timedelta(hours=hours) and not balance_changed:
+                        return
+                except Exception:
+                    pass
+
+            self._log(
+                f"💰 Автоподбор под депозит (${free_balance:.2f})...",
+                "#448AFF"
+            )
+
+            from deposit_coin_filter import scan_for_deposit
+
+            def progress(msg):
+                self._log(f"   {msg}", "#888")
+
+            new_symbols = scan_for_deposit(
+                free_balance=free_balance,
+                verbose=False,
+                progress_callback=progress,
+            )
+
+            if not new_symbols:
+                self._log("⚠ Автоподбор: монет не найдено", "#ff9800")
+                # Обновим timestamp, чтобы не дёргать API каждую минуту
+                with open(state_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'last_scan': datetime.now(timezone.utc).isoformat(),
+                        'balance': free_balance,
+                        'symbols': list(config.AUTO_SYMBOLS),
+                    }, f, indent=2, ensure_ascii=False)
+                return
+
+            old_set = set(config.AUTO_SYMBOLS)
+            new_set = set(new_symbols)
+
+            if old_set == new_set:
+                self._log("✅ Список монет актуален", "#4caf50")
+                with open(state_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'last_scan': datetime.now(timezone.utc).isoformat(),
+                        'balance': free_balance,
+                        'symbols': new_symbols,
+                    }, f, indent=2, ensure_ascii=False)
+                return
+
+            added = new_set - old_set
+            removed = old_set - new_set
+
+            config.AUTO_SYMBOLS = new_symbols
+            self._save_symbols_to_config(new_symbols)
+
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'last_scan': datetime.now(timezone.utc).isoformat(),
+                    'balance': free_balance,
+                    'symbols': new_symbols,
+                }, f, indent=2, ensure_ascii=False)
+
+            self._log(
+                f"✅ Автоподбор под депозит: {len(new_symbols)} монет",
+                "#4caf50"
+            )
+            if added:
+                self._log(f"   + {', '.join(sorted(added))}", "#4caf50")
+            if removed:
+                self._log(f"   − {', '.join(sorted(removed))}", "#ff9800")
+
+            if self.on_log:
+                self.on_log(
+                    f"💰 Список монет обновлён под депозит: {len(new_symbols)}",
+                    "#4caf50"
+                )
+        except Exception as e:
+            self._log(f"⚠ Автоподбор под депозит: {str(e)[:100]}", "#ff9800")
+
+    # ============================================================
     # DAILY STATS
     # ============================================================
     def _load_daily_stats(self):
@@ -247,7 +364,7 @@ class AutoTrader:
             self._save_daily_stats()
             self._log(f"🔄 Новый день: {today}", "#4caf50")
 
-            self._log("⏸ Пауза 10 сек после сброса дня...", "#888")
+            self._log("⏸ Пауза 10 сек...", "#888")
             for _ in range(10):
                 if self._stop_flag:
                     return
@@ -354,7 +471,7 @@ class AutoTrader:
                 ratio = (atr_pct - low) / (high - low)
                 pct = max_pct - ratio * (max_pct - min_pct)
 
-            self._log(f"📊 Адаптивный размер: ATR {atr_pct:.1f}% → {pct:.2f}%", "#888")
+            self._log(f"📊 Адаптив размер: ATR {atr_pct:.1f}% → {pct:.2f}%", "#888")
         else:
             pct = base_pct
 
@@ -366,10 +483,6 @@ class AutoTrader:
         return size, size_by_pct, pct
 
     def _compute_features_for_aml(self, symbol):
-        """
-        Считает фичи как в AdaptiveMLStrategy (для общего буфера обучения).
-        Возвращает list или None.
-        """
         try:
             raw = self.exchange.fetch_ohlcv(symbol, config.TIMEFRAME_M15, limit=200)
             df = pd.DataFrame(raw, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
@@ -407,14 +520,12 @@ class AutoTrader:
             v = df['volume']
             f['vol_ratio'] = (v.iloc[-1] / v.rolling(20).mean().iloc[-1]) if v.rolling(20).mean().iloc[-1] else 1.0
 
-            # порядок ключей должен совпадать с AdaptiveMLStrategy._features()
             order = [
                 'ret_1','ret_3','ret_5','ret_10','ret_20',
                 'sma_5_ratio','sma_10_ratio','sma_20_ratio','sma_50_ratio',
                 'rsi_14','macd','macd_sig','atr_14','vol_20','vol_ratio',
             ]
             vals = [float(f.get(k, 0.0)) for k in order]
-            # NaN → 0
             vals = [0.0 if v != v else v for v in vals]
             return vals
         except Exception:
@@ -429,25 +540,21 @@ class AutoTrader:
             if not open_syms:
                 return
 
-            open_now = set()
-            for _sym in open_syms:
-                try:
-                    positions = self.exchange.fetch_positions([_sym])
-                except Exception:
-                    try:
-                        positions = self.exchange.fetch_positions()
-                    except Exception:
-                        continue
+            try:
+                positions = self.exchange.fetch_positions()
+            except Exception as e:
+                self._log(f"⚠ fetch_positions: {str(e)[:80]}", "#ff9800")
+                return
 
-                for p in positions:
-                    try:
-                        contracts = float(p.get('contracts', 0) or 0)
-                        if abs(contracts) > 0:
-                            sym = p.get('symbol')
-                            if sym:
-                                open_now.add(sym)
-                    except Exception:
-                        continue
+            open_now = set()
+            for p in positions:
+                try:
+                    if abs(float(p.get('contracts', 0) or 0)) > 0:
+                        sym = p.get('symbol')
+                        if sym:
+                            open_now.add(sym)
+                except Exception:
+                    continue
 
             for symbol in list(self.trader.state['open_positions'].keys()):
                 if symbol not in open_now:
@@ -491,16 +598,13 @@ class AutoTrader:
 
                     self.add_to_history(trade_record)
 
-                                        # ==== ХУК: сообщаем стратегии, что сделка закрыта ====
                     try:
                         trade_for_strategy = dict(trade_record)
                         trade_for_strategy['features'] = self._last_features_by_symbol.pop(symbol, None)
                         self.strategy.on_trade_closed(trade_for_strategy)
-
-                        # Всегда кормим общий AML-буфер
                         self._feed_aml_buffer(trade_for_strategy)
                     except Exception as e:
-                        self._log(f"⚠ strategy.on_trade_closed: {str(e)[:80]}", "#ff9800")
+                        self._log(f"⚠ on_trade_closed: {str(e)[:80]}", "#ff9800")
 
                     if SIGNAL_LOG_AVAILABLE and pos.get('open_ts'):
                         try:
@@ -606,12 +710,15 @@ class AutoTrader:
         self._log(f"Размер: {pct}% (адаптивный: {config.USE_ADAPTIVE_SIZE})", "#888")
         self._log(f"Плечо: до {config.MAX_AUTO_LEVERAGE}x", "#888")
         self._log(f"MTF: {config.USE_MULTI_TIMEFRAME}", "#888")
-        self._log(f"4h-фильтр: {getattr(config, 'USE_4H_TREND_FILTER', True)}", "#888")
-        self._log(f"Trailing: {config.USE_TRAILING_STOP}", "#888")
+        self._log(f"Trailing: {config.USE_TRAILING_STOP} "
+                  f"(ATR-режим: {getattr(config, 'USE_TRAILING_ATR', False)})", "#888")
         self._log(f"Адаптивный стоп: {config.USE_ADAPTIVE_STOP}", "#888")
         self._log(f"Пирамидинг: {config.USE_PYRAMIDING}", "#888")
         self._log(f"Хеджирование: {config.USE_HEDGING}", "#888")
-        self._log(f"Лог сигналов: {SIGNAL_LOG_AVAILABLE}", "#888")
+        self._log(
+            f"Автоподбор под депозит: {getattr(config, 'DEPOSIT_AUTO_SCAN_ENABLED', False)}",
+            "#888"
+        )
 
     def stop(self):
         self._stop_flag = True
@@ -623,7 +730,6 @@ class AutoTrader:
     # ============================================================
     def _log_signal_safe(self, symbol, sig, price, level_price, touches,
                          atr_pct, trend, distance_pct, opened, reason):
-        """Безопасно пишет сигнал в signal_logger."""
         if not SIGNAL_LOG_AVAILABLE:
             return
         try:
@@ -647,7 +753,8 @@ class AutoTrader:
         if os.path.exists(self._aml_shared_buffer_file):
             try:
                 with open(self._aml_shared_buffer_file, 'r', encoding='utf-8') as f:
-                    self._aml_shared_buffer = json.load(f)
+                    data = json.load(f)
+                self._aml_shared_buffer = data[-5000:] if isinstance(data, list) else []
             except Exception:
                 self._aml_shared_buffer = []
 
@@ -659,7 +766,6 @@ class AutoTrader:
             pass
 
     def _feed_aml_buffer(self, trade):
-        """Кладёт (features, label) в общий буфер AML."""
         feat = trade.get('features')
         if feat is None:
             return
@@ -692,6 +798,7 @@ class AutoTrader:
         if getattr(config, 'AUTO_MANAGE_COINS', True):
             self._auto_manage_coins()
 
+        # Рыночный автоскан (отключён, если включён автоподбор по депозиту)
         self._auto_scan_coins()
 
         self.check_closed_positions()
@@ -732,7 +839,10 @@ class AutoTrader:
                 self.stop()
             return
 
-        if free < config.AUTO_MIN_FREE_BALANCE:
+        # ==== АВТОПОДБОР ПОД ДЕПОЗИТ (после получения free) ====
+        self._deposit_auto_scan_coins(free)
+
+        if total < config.AUTO_MIN_FREE_BALANCE:
             return
 
         if self.on_balance:
@@ -749,14 +859,12 @@ class AutoTrader:
             if len(self.trader.state['open_positions']) >= config.MAX_POSITIONS_TOTAL:
                 break
 
-                        # ==== ВЫЗОВ СТРАТЕГИИ ====
             try:
                 sig = self.strategy.check_symbol(symbol, free)
             except Exception as e:
                 self._log(f"Ошибка {symbol}: {str(e)[:80]}", "#f44336")
                 continue
 
-            # Всегда считаем фичи (для AML-буфера), даже если стратегия другая
             if sig is not None and 'features' not in (sig.meta or {}):
                 try:
                     sig.meta['features'] = self._compute_features_for_aml(symbol)
@@ -768,7 +876,6 @@ class AutoTrader:
 
             signals_found += 1
 
-            # ==== МЕТА из сигнала ====
             sig_type = sig.meta.get('signal_type', sig.reason or 'SIG')
             level_price = sig.meta.get('level_price', 0)
             touches = sig.meta.get('touches', 0)
@@ -777,13 +884,11 @@ class AutoTrader:
             signal_price = sig.meta.get('price', 0)
             distance_pct = sig.meta.get('distance_to_level_pct', 0)
 
-            # ==== РАЗМЕР ====
             if sig.size_usd is not None:
                 size = sig.size_usd
             else:
                 size, _size_by_pct, _used_pct = self._calc_position_size(free, atr_pct)
 
-            # ==== ПЛЕЧО ====
             if sig.leverage is not None:
                 lev = sig.leverage
                 lev_info = f"плечо {lev}x (strategy)"
@@ -795,7 +900,6 @@ class AutoTrader:
                 lev = config.DEFAULT_LEVERAGE
                 lev_info = f"плечо {lev}x"
 
-            # ==== ЛОГ ====
             if level_price:
                 self._log(
                     f"🔔 {sig.direction} {symbol} (ур. {level_price:.6f}, x{touches}, {sig_type}) "
@@ -815,7 +919,6 @@ class AutoTrader:
                 except Exception:
                     pass
 
-            # ==== ПРОВЕРКА ЛИМИТОВ ====
             can_open = True
             skip_reason = ""
 
@@ -835,7 +938,6 @@ class AutoTrader:
                 )
                 continue
 
-            # ==== ОТКРЫТИЕ ====
             try:
                 old_max = config.MAX_POSITION_USD
                 config.MAX_POSITION_USD = size
@@ -857,7 +959,6 @@ class AutoTrader:
                     self._save_daily_stats()
                     self._log(f"✅ {msg} (${size:.2f}, {lev}x)", "#4caf50")
 
-                    # Доп. мета в позицию
                     if symbol in self.trader.state['open_positions']:
                         p = self.trader.state['open_positions'][symbol]
                         p['signal_type'] = sig_type
@@ -869,7 +970,6 @@ class AutoTrader:
                         p['confidence'] = sig.confidence
                         self.trader._save_state()
 
-                    # Фичи для онлайн-обучения
                     if 'features' in sig.meta:
                         self._last_features_by_symbol[symbol] = sig.meta['features']
 
@@ -927,7 +1027,6 @@ class AutoTrader:
             self._log(f"⚠ auto_manage: {str(e)[:80]}", "#ff9800")
 
     def _save_symbols_to_config(self, symbols):
-        import re
         try:
             with open('config.py', 'r', encoding='utf-8') as f:
                 content = f.read()

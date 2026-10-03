@@ -3,6 +3,9 @@
 
 Обёртка над текущей логикой auto_trader.py.
 Поведение не меняется — просто инкапсулировано в класс StrategyBase.
+
+ДОБАВЛЕНО: метод evaluate_at() для бэктеста — работает БЕЗ сети,
+на переданном DataFrame.
 """
 
 from datetime import datetime, timezone
@@ -164,7 +167,7 @@ class ClassicLevelsStrategy(StrategyBase):
                 and self._price_from_below(df, i, lp))
 
     # ============================================================
-    # ГЛАВНЫЙ МЕТОД
+    # ГЛАВНЫЙ МЕТОД (LIVE)
     # ============================================================
     def check_symbol(self, symbol, free_balance):
         levels, trend, atr_cached = self._get_levels(symbol)
@@ -240,16 +243,90 @@ class ClassicLevelsStrategy(StrategyBase):
         return Signal(
             direction=side,
             confidence=1.0,
-            stop_pct=None,       # Trader посчитает через адаптивный ATR
+            stop_pct=None,
             take_pct=None,
-            leverage=None,       # AutoTrader посчитает через calc_leverage
-            size_usd=None,       # AutoTrader посчитает через _calc_position_size
+            leverage=None,
+            size_usd=None,
             reason=sig_type,
             meta={
                 'signal_type': sig_type,
                 'level_price': nearest['price'],
                 'touches': nearest['touches'],
                 'atr_pct': atr_cached,
+                'trend': trend,
+                'distance_to_level_pct': distance_pct,
+                'price': price,
+            },
+        )
+
+    # ============================================================
+    # BACKTEST-РЕЖИМ: оценка сигнала на конкретной точке df
+    # ============================================================
+    def evaluate_at(self, df_15m, idx, levels, trend, atr_pct):
+        """
+        Оценивает сигнал на свече idx.
+        Работает БЕЗ сети — все данные переданы аргументами.
+
+        df_15m  — DataFrame 15m свечей (уже загруженный)
+        idx     — индекс оцениваемой свечи
+        levels  — список уровней [{price, touches, last_ts}, ...]
+        trend   — 'UP'/'DOWN'/'NEUTRAL'
+        atr_pct — ATR% на момент idx (для меты)
+        """
+        if idx < config.LOOKBACK_CANDLES + 1 or idx >= len(df_15m):
+            return None
+        if not levels:
+            return None
+
+        c = df_15m.iloc[idx]
+        price = c['close']
+        ts = c['ts']
+
+        near = [
+            l for l in levels
+            if l['price'] > 0
+            and abs(l['price'] - price) / price * 100 <= config.NEAR_LEVEL_PCT
+            and (ts - l['last_ts']).days <= config.MAX_LEVEL_AGE_DAYS
+        ]
+        if not near:
+            return None
+
+        nearest = min(near, key=lambda x: abs(x['price'] - price))
+        is_support = nearest['price'] < price
+
+        side = None
+        sig_type = None
+
+        if is_support:
+            if self._is_bullish_pinbar(c):
+                side, sig_type = 'LONG', 'PINBAR'
+            elif config.USE_BOUNCE_SIGNAL and self._is_bounce_long(df_15m, idx, nearest['price']):
+                side, sig_type = 'LONG', 'BOUNCE'
+        else:
+            if self._is_bearish_pinbar(c):
+                side, sig_type = 'SHORT', 'PINBAR'
+            elif config.USE_BOUNCE_SIGNAL and self._is_bounce_short(df_15m, idx, nearest['price']):
+                side, sig_type = 'SHORT', 'BOUNCE'
+
+        if not side:
+            return None
+
+        # MTF и 4h-фильтры пропускаем в бэктесте — данных нет без сети
+        distance_pct = abs(nearest['price'] - price) / price * 100
+
+        return Signal(
+            direction=side,
+            confidence=1.0,
+            stop_pct=None,
+            take_pct=None,
+            leverage=None,
+            size_usd=None,
+            reason=sig_type,
+            meta={
+                'signal_type': sig_type,
+                'level_price': nearest['price'],
+                'touches': nearest['touches'],
+                'atr_pct': atr_pct,
                 'trend': trend,
                 'distance_to_level_pct': distance_pct,
                 'price': price,

@@ -1,15 +1,15 @@
 """
 A/B сравнение конфигураций в бэктесте.
 Принимает список configs от GUI.
+
+ДОБАВЛЕНО: параметр strategy_name передаётся в run_backtest.
 """
 import config
 from backtest_runner import run_backtest
 
 
-def compare_configurations(symbols, configs, backtest_days=14, progress_callback=None):
-    """configs — список словарей вида:
-        [{'name': 'MTF only', 'config': {'USE_MULTI_TIMEFRAME': True}}, ...]
-    """
+def compare_configurations(symbols, configs, backtest_days=14,
+                            progress_callback=None, strategy_name=None):
     def log(msg):
         if progress_callback:
             progress_callback(msg)
@@ -30,6 +30,7 @@ def compare_configurations(symbols, configs, backtest_days=14, progress_callback
                 backtest_days=backtest_days,
                 progress_callback=None,
                 override_config=override,
+                strategy_name=strategy_name,
             )
             summary = result.get('summary') or {}
 
@@ -62,54 +63,41 @@ def compare_configurations(symbols, configs, backtest_days=14, progress_callback
 
 
 def build_entry_ab_configs(base_config=None):
-    """
-    Строит список конфигураций для A/B-теста ПАРАМЕТРОВ ВХОДА.
-    Возвращает список:
-      [{'name': 'База', 'config': {}},
-       {'name': 'MIN_TOUCHES=3', 'config': {'MIN_TOUCHES': 3}}, ...]
-    """
     configs = [{'name': 'База (текущие настройки)', 'config': {}}]
 
-    # ===== Варианты MIN_TOUCHES =====
     for mt in [3, 5, 6, 8]:
         configs.append({
             'name': f'MIN_TOUCHES = {mt}',
             'config': {'MIN_TOUCHES': mt},
         })
 
-    # ===== Варианты NEAR_LEVEL_PCT =====
     for near in [0.3, 0.5, 1.2, 1.5]:
         configs.append({
             'name': f'NEAR = {near}%',
             'config': {'NEAR_LEVEL_PCT': near},
         })
 
-    # ===== Варианты CLUSTER_PCT =====
     for cl in [0.3, 0.4, 1.0, 1.5]:
         configs.append({
             'name': f'CLUSTER = {cl}%',
             'config': {'CLUSTER_PCT': cl},
         })
 
-    # ===== Только PINBAR =====
     configs.append({
         'name': 'Только PINBAR',
         'config': {'USE_BOUNCE_SIGNAL': False},
     })
 
-    # ===== Только BOUNCE =====
     configs.append({
         'name': 'Только BOUNCE',
         'config': {'USE_BOUNCE_SIGNAL': True, 'PINBAR_DISABLED': True},
     })
 
-    # ===== Без тренд-фильтра =====
     configs.append({
         'name': 'Без TREND-фильтра',
         'config': {'USE_TREND_FILTER': False},
     })
 
-    # ===== + MTF =====
     configs.append({
         'name': '+ MTF фильтр',
         'config': {'USE_MULTI_TIMEFRAME': True},
@@ -118,8 +106,8 @@ def build_entry_ab_configs(base_config=None):
     return configs
 
 
-# Обратная совместимость со старым API
-def compare_functions(symbols=None, backtest_days=10, progress_callback=None):
+def compare_functions(symbols=None, backtest_days=10,
+                       progress_callback=None, strategy_name=None):
     if symbols is None:
         symbols = list(config.AUTO_SYMBOLS)
 
@@ -139,33 +127,5 @@ def compare_functions(symbols=None, backtest_days=10, progress_callback=None):
             'USE_ADAPTIVE_SIZE': True,
         }},
     ]
-    return compare_configurations(symbols, configs, backtest_days, progress_callback)
-
-
-if __name__ == '__main__':
-    print("A/B СРАВНЕНИЕ ФУНКЦИЙ")
-    print("=" * 60)
-
-    def cli_log(msg):
-        print(msg)
-
-    results = compare_functions(
-        symbols=config.AUTO_SYMBOLS[:5],
-        backtest_days=10,
-        progress_callback=cli_log,
-    )
-
-    print()
-    print("=" * 60)
-    print("ИТОГИ:")
-    print(f"{'Конфигурация':<25} {'Сделок':>8} {'Winrate':>10} {'P&L':>10} {'PF':>6}")
-    print("-" * 60)
-    for r in results:
-        if r.get('error'):
-            print(f"{r['name']:<25} ОШИБКА")
-        else:
-            print(f"{r['name']:<25} "
-                  f"{r['trades_count']:>8} "
-                  f"{r['winrate']:>9.1f}% "
-                  f"{r['pnl']:>+9.2f}% "
-                  f"{r['pf']:>6.2f}")
+    return compare_configurations(symbols, configs, backtest_days,
+                                   progress_callback, strategy_name)

@@ -1,5 +1,9 @@
 """
 Менеджер equity — кривая прибыли, статистика.
+
+ИСПРАВЛЕНИЯ:
+  - Защита от start == 0 при расчёте total_growth_pct
+  - Защита от пустых equities в get_stats
 """
 import json
 import os
@@ -15,7 +19,8 @@ class EquityManager:
         if os.path.exists(self.equity_file):
             try:
                 with open(self.equity_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                return data if isinstance(data, list) else []
             except Exception:
                 pass
         return []
@@ -68,22 +73,34 @@ class EquityManager:
         return result
 
     def get_stats(self):
+        """ИСПРАВЛЕНИЕ: защита от пустого списка и start == 0."""
         if not self.points:
-            return {'start': 0, 'current': 0, 'peak': 0,
-                    'max_dd': 0, 'total_growth': 0, 'total_growth_pct': 0}
+            return {
+                'start': 0, 'current': 0, 'peak': 0,
+                'max_dd': 0, 'total_growth': 0, 'total_growth_pct': 0,
+            }
 
         equities = [p['equity'] for p in self.points]
+        if not equities:
+            return {
+                'start': 0, 'current': 0, 'peak': 0,
+                'max_dd': 0, 'total_growth': 0, 'total_growth_pct': 0,
+            }
+
         start = equities[0]
         current = equities[-1]
         peak = max(equities)
 
         dd = 0
         max_dd = 0
+        peak_running = equities[0]
         for e in equities:
-            if e > peak:
-                peak = e
-            dd = peak - e
+            if e > peak_running:
+                peak_running = e
+            dd = peak_running - e
             max_dd = max(max_dd, dd)
+
+        growth_pct = (current - start) / start * 100 if start > 0 else 0.0
 
         return {
             'start': start,
@@ -91,7 +108,7 @@ class EquityManager:
             'peak': peak,
             'max_dd': max_dd,
             'total_growth': current - start,
-            'total_growth_pct': (current - start) / start * 100 if start > 0 else 0,
+            'total_growth_pct': growth_pct,
         }
 
     def get_streaks(self, history_file='trade_history.json'):

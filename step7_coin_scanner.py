@@ -1,6 +1,9 @@
 """
 Автоподбор монет для торговли.
 Все фильтры читаются из config.py — их можно менять из GUI.
+
+ИСПРАВЛЕНИЕ: top_n передаётся параметром, а не через мутацию config,
+чтобы избежать race condition при параллельном доступе.
 """
 import ccxt
 import pandas as pd
@@ -51,8 +54,11 @@ def get_3day_move_pct(exchange, symbol):
         return None
 
 
-def scan_coins(verbose=True, progress_callback=None):
-    """Сканирует Bybit и возвращает DataFrame с найденными монетами."""
+def scan_coins(verbose=True, progress_callback=None, top_n=None):
+    """
+    Сканирует Bybit и возвращает DataFrame с найденными монетами.
+    top_n: если задан — используется вместо config.SCANNER_TOP_N
+    """
     MAX_PRICE = _get_param('SCANNER_MAX_PRICE', 5.0)
     MIN_VOLUME_USD = _get_param('SCANNER_MIN_VOLUME_USD', 15_000_000)
     MIN_ATR_PCT = _get_param('SCANNER_MIN_ATR_PCT', 6.0)
@@ -62,7 +68,9 @@ def scan_coins(verbose=True, progress_callback=None):
     MIN_DAILY_CANDLES = _get_param('SCANNER_MIN_DAILY_CANDLES', 90)
     MAX_3DAY_MOVE_PCT = _get_param('SCANNER_MAX_3DAY_MOVE_PCT', 20.0)
     BLACKLIST = _get_param('SCANNER_BLACKLIST', [])
-    TOP_N = _get_param('SCANNER_TOP_N', 10)
+
+    if top_n is None:
+        top_n = _get_param('SCANNER_TOP_N', 10)
 
     def log(msg):
         if verbose:
@@ -141,7 +149,7 @@ def scan_coins(verbose=True, progress_callback=None):
     if df.empty:
         return df
     df = df.sort_values('atr_pct', ascending=False)
-    return df.head(TOP_N)
+    return df.head(top_n)
 
 
 def print_results(df):
@@ -158,18 +166,11 @@ def print_results(df):
 
 
 def get_top_symbols(n=None, verbose=False, progress_callback=None):
-    """Возвращает список тикеров — топ N монет."""
-    if n is not None:
-        # Временно переопределяем
-        old = getattr(config, 'SCANNER_TOP_N', 10)
-        config.SCANNER_TOP_N = n
-        try:
-            df = scan_coins(verbose=verbose, progress_callback=progress_callback)
-        finally:
-            config.SCANNER_TOP_N = old
-    else:
-        df = scan_coins(verbose=verbose, progress_callback=progress_callback)
-
+    """
+    Возвращает список тикеров — топ N монет.
+    ИСПРАВЛЕНИЕ: не мутирует config.SCANNER_TOP_N.
+    """
+    df = scan_coins(verbose=verbose, progress_callback=progress_callback, top_n=n)
     return [] if df.empty else df['symbol'].tolist()
 
 

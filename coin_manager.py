@@ -1,6 +1,11 @@
 """
 Управление списком монет.
 Автоматически добавляет/убирает на основе статистики и бэктеста.
+
+ИСПРАВЛЕНИЯ:
+  - _load_history и _load_state защищены от невалидного JSON
+  - analyze_and_update: защита от дублей в excluded (не добавляет одну монету дважды)
+  - Корректная обработка "последних N сделок" для consecutive_losses
 """
 import json
 import os
@@ -20,14 +25,16 @@ class CoinManager:
         if os.path.exists(self.management_file):
             try:
                 with open(self.management_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
             except Exception:
                 pass
         return {
-            'last_scan': None,          # последнее автосканирование
-            'last_analysis': None,      # последний анализ
-            'excluded': [],             # монеты, которые убрали (чтобы не добавлять снова)
-            'history': [],              # история изменений
+            'last_scan': None,
+            'last_analysis': None,
+            'excluded': [],
+            'history': [],
         }
 
     def _save_state(self):
@@ -41,7 +48,8 @@ class CoinManager:
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                return data if isinstance(data, list) else []
             except Exception:
                 pass
         return []
@@ -50,12 +58,11 @@ class CoinManager:
         """Логирует изменение списка монет."""
         entry = {
             'ts': datetime.now(timezone.utc).isoformat(),
-            'action': action,   # 'add' или 'remove'
+            'action': action,
             'symbol': symbol,
             'reason': reason,
         }
         self.state['history'].append(entry)
-        # Ограничим историю 1000 записей
         if len(self.state['history']) > 1000:
             self.state['history'] = self.state['history'][-1000:]
         self._save_state()
@@ -72,7 +79,7 @@ class CoinManager:
         by_symbol = defaultdict(lambda: {
             'trades': 0, 'wins': 0, 'losses': 0,
             'pnl_pct': 0.0, 'pnl_usd': 0.0,
-            'last_trades': [],  # последние N сделок для анализа
+            'last_trades': [],
         })
 
         for t in recent:
@@ -108,37 +115,42 @@ class CoinManager:
             trades = s['trades']
 
             if trades < min_trades:
-                continue  # мало данных
+                continue
 
-            # Проверка 1: общий P&L < min_pnl_pct
             if s['pnl_pct'] < min_pnl_pct:
                 to_remove.append((symbol, f"P&L {s['pnl_pct']:+.2f}% < {min_pnl_pct}% за {trades} сделок"))
                 continue
 
-            # Проверка 2: N убытков подряд (последние сделки)
             last = s['last_trades'][-consecutive_losses:]
             if len(last) >= consecutive_losses and all(p < 0 for p in last):
                 to_remove.append((symbol, f"{consecutive_losses} убытка подряд"))
 
-        # Применяем удаления
         new_symbols = [s for s in current_symbols if s not in [r[0] for r in to_remove]]
         changes = []
+
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
 
         for symbol, reason in to_remove:
             change = self._log_change('remove', symbol, reason)
             changes.append(change)
-            # Добавляем в чёрный список на 7 дней
-            self.state['excluded'].append({
-                'symbol': symbol,
-                'until': (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
-                'reason': reason,
-            })
+
+            # Проверяем, нет ли уже активного исключения для этой монеты
+            already_excluded = any(
+                e.get('symbol') == symbol and e.get('until', '') > now_iso
+                for e in self.state['excluded']
+            )
+            if not already_excluded:
+                self.state['excluded'].append({
+                    'symbol': symbol,
+                    'until': (now + timedelta(days=7)).isoformat(),
+                    'reason': reason,
+                })
 
         # Убираем старые исключения
-        now_iso = datetime.now(timezone.utc).isoformat()
-        self.state['excluded'] = [e for e in self.state['excluded'] if e['until'] > now_iso]
+        self.state['excluded'] = [e for e in self.state['excluded'] if e.get('until', '') > now_iso]
 
-        self.state['last_analysis'] = datetime.now(timezone.utc).isoformat()
+        self.state['last_analysis'] = now_iso
         self._save_state()
 
         return new_symbols, changes
@@ -147,7 +159,7 @@ class CoinManager:
         """Проверяет, в чёрном списке ли монета."""
         now_iso = datetime.now(timezone.utc).isoformat()
         for e in self.state['excluded']:
-            if e['symbol'] == symbol and e['until'] > now_iso:
+            if e.get('symbol') == symbol and e.get('until', '') > now_iso:
                 return True
         return False
 

@@ -1,11 +1,13 @@
 """
 Обёртка над ccxt для Bybit.
 С кэшем balance/equity и retry для API-запросов.
+Кэш потокобезопасен (threading.Lock).
 """
 import os
 import time
+import threading
 import ccxt
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,6 +15,7 @@ load_dotenv()
 # ==== КЭШ ====
 _balance_cache = {'data': None, 'ts': 0}
 _equity_cache = {'data': None, 'ts': 0}
+_cache_lock = threading.Lock()
 CACHE_TTL = 30  # секунд
 
 
@@ -29,13 +32,11 @@ def _fetch_with_retry(func, *args, max_attempts=3, delay=2, **kwargs):
             last_error = e
             err = str(e).lower()
 
-            # Rate limit — увеличиваем паузу
             if '10006' in err or 'too many' in err:
                 wait = delay * (attempt + 1)
                 time.sleep(wait)
                 continue
 
-            # Другие ошибки — retry с обычной паузой
             if attempt < max_attempts - 1:
                 time.sleep(delay)
                 continue
@@ -45,7 +46,7 @@ def _fetch_with_retry(func, *args, max_attempts=3, delay=2, **kwargs):
 
 
 def make_exchange(api_key=None, api_secret=None, testnet=None):
-    """Создаёт подключение к Bybit."""
+    """Создаёт подключение к Bybit с расширенным recv_window."""
     if api_key is None:
         api_key = os.getenv('BYBIT_API_KEY')
     if api_secret is None:
@@ -69,18 +70,23 @@ def make_exchange(api_key=None, api_secret=None, testnet=None):
         'apiKey': api_key,
         'secret': api_secret,
         'enableRateLimit': True,
-        'options': {'defaultType': 'swap'},
+        'options': {
+            'defaultType': 'swap',
+            'recvWindow': 20000,          # ← 20 сек вместо 5
+            'adjustForTimeDifference': True,  # ← CCXT сам подстроит время
+        },
         **({'urls': urls} if urls else {}),
     })
 
 
 def check_connection(exchange, use_cache=True):
-    """Баланс USDT с кэшем 30 сек."""
+    """Баланс USDT с кэшем 30 сек. Потокобезопасно."""
     global _balance_cache
     now = time.time()
 
-    if use_cache and _balance_cache['data'] and (now - _balance_cache['ts']) < CACHE_TTL:
-        return _balance_cache['data']
+    with _cache_lock:
+        if use_cache and _balance_cache['data'] and (now - _balance_cache['ts']) < CACHE_TTL:
+            return _balance_cache['data']
 
     balance = _fetch_with_retry(exchange.fetch_balance)
     usdt = balance.get('USDT', {})
@@ -89,17 +95,19 @@ def check_connection(exchange, use_cache=True):
         'free': usdt.get('free', 0),
         'used': usdt.get('used', 0),
     }
-    _balance_cache = {'data': result, 'ts': now}
+    with _cache_lock:
+        _balance_cache = {'data': result, 'ts': time.time()}
     return result
 
 
 def get_equity(exchange, use_cache=True):
-    """Equity аккаунта с кэшем."""
+    """Equity аккаунта с кэшем. Потокобезопасно."""
     global _equity_cache
     now = time.time()
 
-    if use_cache and _equity_cache['data'] and (now - _equity_cache['ts']) < CACHE_TTL:
-        return _equity_cache['data']
+    with _cache_lock:
+        if use_cache and _equity_cache['data'] and (now - _equity_cache['ts']) < CACHE_TTL:
+            return _equity_cache['data']
 
     try:
         result = _fetch_with_retry(
@@ -121,7 +129,8 @@ def get_equity(exchange, use_cache=True):
             'margin_used': float(acc.get('totalInitialMargin', 0)),
             'available': float(acc.get('totalAvailableBalance', 0)),
         }
-        _equity_cache = {'data': data, 'ts': now}
+        with _cache_lock:
+            _equity_cache = {'data': data, 'ts': time.time()}
         return data
     except Exception as e:
         print(f"Equity error: {e}")
@@ -131,8 +140,9 @@ def get_equity(exchange, use_cache=True):
 def clear_cache():
     """Сбросить кэш баланса и equity."""
     global _balance_cache, _equity_cache
-    _balance_cache = {'data': None, 'ts': 0}
-    _equity_cache = {'data': None, 'ts': 0}
+    with _cache_lock:
+        _balance_cache = {'data': None, 'ts': 0}
+        _equity_cache = {'data': None, 'ts': 0}
 
 
 def test_api_keys(api_key, api_secret, testnet=False):
@@ -184,7 +194,6 @@ def set_leverage(exchange, symbol, leverage):
     try:
         clean_symbol = symbol.split(':')[0].replace('/', '')
 
-        # Способ 1: прямой API Bybit v5
         try:
             result = _fetch_with_retry(
                 exchange.private_post_v5_position_set_leverage,
@@ -204,7 +213,6 @@ def set_leverage(exchange, symbol, leverage):
         except Exception as e:
             last_error = e
 
-        # Способ 2: ccxt
         try:
             exchange.set_leverage(leverage, clean_symbol, params={'category': 'linear'})
             return True
@@ -274,7 +282,6 @@ def get_min_amount(exchange, symbol):
 
 def get_closed_pnl(exchange, days=1):
     """Закрытые сделки за N дней."""
-    from datetime import timedelta
     try:
         start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
         result = _fetch_with_retry(

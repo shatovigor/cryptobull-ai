@@ -1,6 +1,13 @@
 """
 Trailing Stop Manager.
+
 Двигает стоп-лосс вслед за ценой, фиксируя прибыль.
+Сохраняет существующий takeProfit при сдвиге стопа.
+
+АДАПТИВНЫЙ РЕЖИМ (USE_TRAILING_ATR=True):
+  - шаг и старт зависят от ATR% конкретной монеты.
+  - Для волатильных монет — широкий шаг, чтобы не выбивало шумом.
+  - Для спокойных — узкий шаг, чтобы фиксировать прибыль.
 """
 import json
 import os
@@ -23,7 +30,7 @@ class TrailingManager:
                     return json.load(f)
             except Exception:
                 pass
-        return {}  # symbol -> {'best_price': ..., 'last_stop': ...}
+        return {}
 
     def _save_state(self):
         try:
@@ -33,12 +40,9 @@ class TrailingManager:
             pass
 
     def update_all(self):
-        """Обновляет trailing stop для всех открытых позиций.
-           Вызывается каждые 60 секунд."""
         if not getattr(config, 'USE_TRAILING_STOP', True):
             return
 
-        # self.trader — это AutoTrader (передаётся в __init__). У него есть .state, .exchange, .position_mode
         open_positions = self.trader.state.get('open_positions', {})
         if not open_positions:
             return
@@ -49,11 +53,37 @@ class TrailingManager:
             except Exception as e:
                 self.log(f"⚠ Trailing {symbol}: {str(e)[:60]}", "#ff9800")
 
+    def _compute_step_and_start(self, pos):
+        """
+        Возвращает (step_pct, start_pct) для позиции.
+        Если USE_TRAILING_ATR=True и есть atr_pct — использует ATR.
+        Иначе — фиксированные значения из config.
+        """
+        use_atr = getattr(config, 'USE_TRAILING_ATR', True)
+        atr_pct = pos.get('atr_pct')
+
+        base_start = getattr(config, 'TRAILING_START_PCT', 4.0)
+        base_step = getattr(config, 'TRAILING_STEP_PCT', 1.0)
+
+        if use_atr and atr_pct and atr_pct > 0:
+            step_pct = atr_pct * getattr(config, 'TRAILING_ATR_STEP_MULT', 0.4)
+            start_pct = atr_pct * getattr(config, 'TRAILING_ATR_START_MULT', 1.0)
+
+            step_min = getattr(config, 'TRAILING_ATR_MIN_PCT', 0.5)
+            step_max = getattr(config, 'TRAILING_ATR_MAX_PCT', 5.0)
+            step_pct = max(step_min, min(step_max, step_pct))
+
+            # Старт не меньше базового
+            start_pct = max(base_start, start_pct)
+        else:
+            step_pct = base_step
+            start_pct = base_start
+
+        return step_pct, start_pct
+
     def _update_position(self, symbol, pos):
-        """Обновляет trailing stop для одной позиции."""
         from bybit_client import get_ticker
 
-        # Текущая цена
         try:
             current = get_ticker(self.trader.exchange, symbol)
         except Exception:
@@ -63,28 +93,29 @@ class TrailingManager:
         side = pos['side']
         current_stop = pos['stop']
 
-        # Текущий P&L%
         if side == 'LONG':
             pnl_pct = (current - entry) / entry * 100
         else:
             pnl_pct = (entry - current) / entry * 100
 
-        # Если ещё не достигли порога — не трогаем
-        start_pct = getattr(config, 'TRAILING_START_PCT', 1.0)
+        # ==== АДАПТИВНЫЙ ШАГ И СТАРТ ====
+        step_pct, start_pct = self._compute_step_and_start(pos)
+
         if pnl_pct < start_pct:
             return
 
-        # Состояние trailing для этой позиции
         if symbol not in self.state:
             self.state[symbol] = {
                 'best_price': current,
                 'last_stop': current_stop,
                 'started_at': datetime.now(timezone.utc).isoformat(),
+                'step_pct': step_pct,
             }
 
         trail = self.state[symbol]
+        trail['step_pct'] = step_pct
 
-        # Обновляем "лучшую" цену (для SHORT — минимальная, для LONG — максимальная)
+        # Обновляем "лучшую" цену
         if side == 'LONG':
             if current > trail['best_price']:
                 trail['best_price'] = current
@@ -92,23 +123,17 @@ class TrailingManager:
             if current < trail['best_price']:
                 trail['best_price'] = current
 
-        # Рассчитываем новый стоп
-        step_pct = getattr(config, 'TRAILING_STEP_PCT', 0.5)
-
+        # Новый стоп
         if side == 'LONG':
-            # Стоп двигается ВВЕРХ
             new_stop = trail['best_price'] * (1 - step_pct / 100)
-            # Не двигаем вниз
             if new_stop <= current_stop:
                 return
         else:
-            # Стоп двигается ВНИЗ
             new_stop = trail['best_price'] * (1 + step_pct / 100)
-            # Не двигаем вверх
             if new_stop >= current_stop:
                 return
 
-        # Округляем
+        # Округляем до точности монеты
         try:
             from bybit_client import get_min_amount
             info = get_min_amount(self.trader.exchange, symbol)
@@ -120,11 +145,9 @@ class TrailingManager:
         except Exception:
             pass
 
-        # Устанавливаем новый стоп на бирже
         ok, msg = self._set_new_stop(symbol, pos, new_stop)
 
         if ok:
-            # Сохраняем в state позиции
             pos['stop'] = new_stop
             self.trader.state['open_positions'][symbol] = pos
             self.trader._save_state()
@@ -134,12 +157,12 @@ class TrailingManager:
 
             self.log(
                 f"📈 Trailing {symbol}: стоп → {new_stop:.6f} "
-                f"(лучшая цена {trail['best_price']:.6f}, P&L {pnl_pct:+.2f}%)",
+                f"(best {trail['best_price']:.6f}, "
+                f"шаг {step_pct:.2f}%, P&L {pnl_pct:+.2f}%)",
                 "#4caf50"
             )
 
     def _set_new_stop(self, symbol, pos, new_stop):
-        """Устанавливает новый стоп через Bybit API."""
         try:
             from bybit_client import get_clean_symbol, get_position_idx
 
@@ -147,17 +170,20 @@ class TrailingManager:
             mode = self.trader.position_mode
             idx = pos.get('position_idx', get_position_idx(mode, pos['side']))
 
+            existing_tp = pos.get('take')
+            if existing_tp is None:
+                return False, "нет takeProfit"
+
             params = {
                 'category': 'linear',
                 'symbol': clean,
                 'tpslMode': 'Full',
                 'slTriggerBy': 'LastPrice',
+                'tpTriggerBy': 'LastPrice',
                 'stopLoss': str(new_stop),
+                'takeProfit': str(existing_tp),
                 'positionIdx': idx,
             }
-
-            # Не трогаем takeProfit — оставляем как есть
-            # (Bybit требует оба поля? Проверим)
 
             result = self.trader.exchange.private_post_v5_position_trading_stop(params)
 
@@ -168,12 +194,12 @@ class TrailingManager:
             return False, str(e)[:80]
 
     def clear(self, symbol):
-        """Удаляет состояние trailing для символа (когда позиция закрыта)."""
         if symbol in self.state:
             del self.state[symbol]
             self._save_state()
 
 
 if __name__ == '__main__':
-    print("TrailingManager — модуль для trailing stop")
-    print("Используется из auto_trader.py")
+    print("TrailingManager — адаптивный по ATR")
+    print("Формула: step = ATR% × TRAILING_ATR_STEP_MULT")
+    print("          start = ATR% × TRAILING_ATR_START_MULT")

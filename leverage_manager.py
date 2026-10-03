@@ -7,13 +7,12 @@
 def calc_leverage(atr_pct, signal_strength=1.0, max_leverage=5.0, base_leverage=1.0):
     """
     Определяет оптимальное плечо.
-    Для агрессивной стратегии — базовое плечо увеличено.
 
-    atr_pct — ATR% (средний дневной диапазон в %)
-    signal_strength — множитель силы сигнала (0.75 – 1.5)
-    max_leverage — максимально допустимое плечо
+    ИСПРАВЛЕНИЕ: защита от atr_pct=None или <=0.
     """
-    # 1. Базовое плечо по ATR (агрессивное)
+    if atr_pct is None or atr_pct <= 0:
+        return max(1.0, min(base_leverage, max_leverage)), "ATR неизвестен"
+
     if atr_pct < 5:
         base = 5.0
         reason = f"низкая волатильность (ATR {atr_pct:.1f}%)"
@@ -30,14 +29,11 @@ def calc_leverage(atr_pct, signal_strength=1.0, max_leverage=5.0, base_leverage=
         base = 1.0
         reason = f"экстремальная волатильность (ATR {atr_pct:.1f}%)"
 
-    # 2. Коррекция по силе сигнала
     leveraged = base * signal_strength
 
-    # 3. Ограничение максимумом
     final = min(leveraged, max_leverage)
     final = max(final, 1.0)
 
-    # Округляем до 0.5
     final = round(final * 2) / 2
 
     return final, reason
@@ -46,7 +42,7 @@ def calc_leverage(atr_pct, signal_strength=1.0, max_leverage=5.0, base_leverage=
 def signal_strength(level_touches):
     """
     Сила сигнала по количеству касаний уровня.
-    
+
     3-5 касаний  → 0.75
     6-10 касаний → 1.0
     11-20 касаний → 1.25

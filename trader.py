@@ -5,6 +5,7 @@
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 
 from bybit_client import (
@@ -23,13 +24,19 @@ class Trader:
 
     def _load_state(self):
         if os.path.exists(config.STATE_FILE):
-            with open(config.STATE_FILE, 'r') as f:
-                return json.load(f)
+            try:
+                with open(config.STATE_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
         return {'open_positions': {}, 'daily_stats': {}}
 
     def _save_state(self):
-        with open(config.STATE_FILE, 'w') as f:
-            json.dump(self.state, f, indent=2, default=str)
+        try:
+            with open(config.STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.state, f, indent=2, default=str, ensure_ascii=False)
+        except Exception:
+            pass
 
     def _today(self):
         return datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -58,6 +65,7 @@ class Trader:
 
     def _open_order(self, symbol, side, amount, position_idx):
         order_side = 'buy' if side == 'LONG' else 'sell'
+        client_id = f"cba-{uuid.uuid4().hex[:16]}"
 
         if side == 'LONG':
             idx_candidates = [position_idx, 0, 1, 2]
@@ -67,7 +75,6 @@ class Trader:
         seen = set()
         idx_candidates = [x for x in idx_candidates if not (x in seen or seen.add(x))]
 
-        order = None
         last_error = None
 
         for idx in idx_candidates:
@@ -75,12 +82,28 @@ class Trader:
                 order = self.exchange.create_order(
                     symbol=symbol, type='market', side=order_side,
                     amount=amount,
-                    params={'reduceOnly': False, 'positionIdx': idx},
+                    params={
+                        'reduceOnly': False,
+                        'positionIdx': idx,
+                        'orderLinkId': client_id,
+                    },
                 )
                 return order, idx, None
             except Exception as e:
                 err = str(e)
                 last_error = e
+
+                if 'orderlinkid' in err.lower() and (
+                    'duplicate' in err.lower() or 'already' in err.lower()
+                ):
+                    try:
+                        existing = self.exchange.fetch_order(
+                            None, symbol, {'orderLinkId': client_id}
+                        )
+                        return existing, idx, None
+                    except Exception:
+                        pass
+
                 if '10001' in err or 'position idx' in err.lower():
                     time.sleep(0.3)
                     continue
@@ -193,13 +216,13 @@ class Trader:
             'take_pct': take_pct,
             'stop_set': stop_ok,
             'position_idx': used_idx,
+            'position_mode': self.position_mode,
             'leverage': _lev,
             'adds': [],
             'hedge': None,
         }
 
         self.state['open_positions'][symbol] = position
-        self._today_stats()['trades'] += 1
         self._save_state()
 
         return True, f"Открыта {side} {symbol} @ {filled_price} (SL {stop_pct:.2f}% / TP {take_pct:.2f}%)", position
@@ -220,6 +243,7 @@ class Trader:
             if not has:
                 del self.state['open_positions'][symbol]
                 self._save_state()
+                self._clear_trailing(symbol)
                 return True, "Уже закрыта"
         except Exception:
             pass
@@ -247,16 +271,35 @@ class Trader:
         self._today_stats()['pnl'] += pnl_pct
         del self.state['open_positions'][symbol]
         self._save_state()
+        self._clear_trailing(symbol)
 
         return True, f"Закрыта @ {exit_price} (P&L {pnl_pct:+.2f}%)"
+
+    def _clear_trailing(self, symbol):
+        try:
+            ts_file = 'trailing_state.json'
+            if not os.path.exists(ts_file):
+                return
+            with open(ts_file, 'r', encoding='utf-8') as f:
+                st = json.load(f)
+            if symbol in st:
+                del st[symbol]
+                with open(ts_file, 'w', encoding='utf-8') as f:
+                    json.dump(st, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
     def _calc_pnl_pct(self, pos, exit_price):
         if pos['side'] == 'LONG':
             gross = (exit_price - pos['entry']) / pos['entry'] * 100
         else:
             gross = (pos['entry'] - exit_price) / pos['entry'] * 100
-        costs = 2 * (config.COMMISSION_PCT + config.SLIPPAGE_PCT)
-        return gross - costs
+
+        lev = float(pos.get('leverage', 1.0) or 1.0)
+        gross_with_lev = gross * lev
+
+        costs = 2 * (config.COMMISSION_PCT + config.SLIPPAGE_PCT) * lev
+        return gross_with_lev - costs
 
     def close_all(self):
         results = []

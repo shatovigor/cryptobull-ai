@@ -1,5 +1,8 @@
 # Настройки торговли.
 # Полная версия с GUI-параметрами + адаптивный стоп по ATR.
+#
+# ВАЖНО: НЕ ДУБЛИРУЙТЕ ключи в этом файле. Python использует ПОСЛЕДНЕЕ
+# присвоение. Если ключ повторяется — работает только последний.
 
 # === ОБЩИЕ ===
 TIMEFRAME_DAILY = '1d'
@@ -35,9 +38,9 @@ TRADES_LOG = 'trades.log'
 STATE_FILE = 'bot_state.json'
 HISTORY_FILE = 'trade_history.json'
 
-# === АВТОБОТ (общие) ===
+# === АВТОБОТ ===
 AUTO_MIN_POSITION_USD = 10.0
-AUTO_MAX_POSITION_USD = 10000.0
+AUTO_MAX_POSITION_USD = 500.0
 AUTO_MAX_TRADES_PER_DAY = 15
 AUTO_DAILY_STOP_PCT = 3.0
 AUTO_CHECK_INTERVAL_SEC = 60
@@ -56,10 +59,10 @@ DAILY_REPORT_MINUTE = 0
 
 # === КРЕДИТНОЕ ПЛЕЧО ===
 USE_AUTO_LEVERAGE = True
-MAX_AUTO_LEVERAGE = 5.0
+MAX_AUTO_LEVERAGE = 2.0
 DEFAULT_LEVERAGE = 2.0
 
-# === МУЛЬТИ-ТАЙМФРЕЙМ ===
+# === MTF ===
 USE_MULTI_TF = True
 LEVELS_TIMEFRAME = '1d'
 
@@ -91,13 +94,13 @@ MTF_CONFIG = {
 MTF_MAX_TOTAL_POSITIONS = 4
 MTF_TIMEFRAMES = ['15m', '1h']
 
-# === MTF для сигналов (используется в auto_trader.py) ===
-USE_MULTI_TIMEFRAME = True
+# === MTF для сигналов ===
+USE_MULTI_TIMEFRAME = False
 MTF_WEIGHT_DAILY = 0.4
 MTF_WEIGHT_4H = 0.3
 MTF_WEIGHT_15M = 0.3
 
-# === СТАРЫЕ НАСТРОЙКИ СДЕЛОК ===
+# === СТОП/ТЕЙК ===
 STOP_PCT_CALM = 2.5
 STOP_PCT_VOLATILE = 3.5
 TAKE_PCT_CALM = 5.0
@@ -107,24 +110,31 @@ USE_TREND_FILTER = True
 USE_4H_TREND_FILTER = True
 COOLDOWN_MINUTES = 120
 
-# === СТАРЫЙ АВТОБОТ ===
-AUTO_POSITION_PCT = 15.0
-MAX_POSITIONS_TOTAL = 4
+# === АВТОБОТ ===
+AUTO_POSITION_PCT = 5.0
+MAX_POSITIONS_TOTAL = 3
 
 # === АДАПТИВНЫЙ СТОП ПО ATR ===
 USE_ADAPTIVE_STOP = True
-ADAPTIVE_STOP_ATR_MULT = 0.6
-ADAPTIVE_TAKE_ATR_MULT = 1.2
+ADAPTIVE_STOP_ATR_MULT = 0.8
+ADAPTIVE_TAKE_ATR_MULT = 2.5
 ADAPTIVE_STOP_MIN_PCT = 1.5
 ADAPTIVE_STOP_MAX_PCT = 8.0
 ADAPTIVE_TAKE_MIN_PCT = 3.0
 ADAPTIVE_TAKE_MAX_PCT = 16.0
 
-# === TRAILING ===
-USE_TRAILING_STOP = False
-TRAILING_START_PCT = 4.0
-TRAILING_STEP_PCT = 1.0
+# === TRAILING (базовый) ===
+USE_TRAILING_STOP = True
+TRAILING_START_PCT = 6.0
+TRAILING_STEP_PCT = 1.0            # fallback, если ATR недоступен
 TRAILING_UPDATE_SEC = 60
+
+# === АДАПТИВНЫЙ TRAILING (по ATR) ===
+USE_TRAILING_ATR = True            # ВКЛ — использовать ATR для шага
+TRAILING_ATR_STEP_MULT = 0.4       # шаг = ATR% × этот коэффициент
+TRAILING_ATR_MIN_PCT = 0.5         # минимальный шаг, %
+TRAILING_ATR_MAX_PCT = 5.0         # максимальный шаг, %
+TRAILING_ATR_START_MULT = 1.0      # trailing_start = ATR% × этот коэффициент
 
 # === АДАПТИВНЫЙ РАЗМЕР ===
 USE_ADAPTIVE_SIZE = True
@@ -143,37 +153,34 @@ COIN_EXCLUDE_DAYS = 7
 COIN_MIN_COUNT = 5
 COIN_MAX_COUNT = 15
 
-# === ПИРАМИДИНГ И ХЕДЖ ===
+# === ПИРАМИДИНГ ===
 USE_PYRAMIDING = False
 PYRAMID_START_PCT = 2.0
 PYRAMID_STEP_PCT = 2.0
 PYRAMID_MAX_ADD = 2
 
+# === ХЕДЖ ===
 USE_HEDGING = False
 HEDGE_TRIGGER_PCT = -2.5
 HEDGE_SIZE_RATIO = 0.5
 
-# === BACKTEST GUI PRESETS ===
+# === BACKTEST ===
 BACKTEST_DEFAULT_DAYS = 14
 
-# === СПИСОК МОНЕТ ===
+# === СПИСОК МОНЕТ (стартовый, перезаписывается автоподбором) ===
 AUTO_SYMBOLS = [
-    'LIT/USDT:USDT',
-    'FARTCOIN/USDT:USDT',
+    'PENGU/USDT:USDT',
     'APT/USDT:USDT',
-    'AERO/USDT:USDT',
+    'SUI/USDT:USDT',
+    'XRP/USDT:USDT',
     '1000PEPE/USDT:USDT',
-    'TRUMP/USDT:USDT',
-    'XLM/USDT:USDT',
 ]
 
-# ============================================
-# ФИЛЬТРЫ СКАНЕРА МОНЕТ
-# ============================================
+# === ФИЛЬТРЫ СКАНЕРА ===
 SCANNER_MAX_PRICE = 5.0
 SCANNER_MIN_VOLUME_USD = 15000000.0
-SCANNER_MIN_ATR_PCT = 6.0
-SCANNER_MAX_ATR_PCT = 11.0
+SCANNER_MIN_ATR_PCT = 5.0
+SCANNER_MAX_ATR_PCT = 9.0
 SCANNER_MIN_CHANGE_PCT = 2.0
 SCANNER_MAX_CHANGE_PCT = 15.0
 SCANNER_MIN_DAILY_CANDLES = 90
@@ -187,41 +194,29 @@ SCANNER_BLACKLIST = [
     'DOT/USDT:USDT',
     'VIRTUAL/USDT:USDT',
     'ADA/USDT:USDT',
+    'LIT/USDT:USDT',
+    'FARTCOIN/USDT:USDT',
 ]
 
-# Автоскан раз в N часов
 SCANNER_AUTO_ENABLED = True
 SCANNER_AUTO_HOURS = 6
 
-# ============================================
-# АКТИВНАЯ СТРАТЕГИЯ
-# ============================================
-# 'classic_levels' | 'adaptive_ml'
-ACTIVE_STRATEGY = 'trendrider'
+# === АКТИВНАЯ СТРАТЕГИЯ ===
+ACTIVE_STRATEGY = 'adaptive_ml'
 
-# === ADAPTIVE ML (используется когда ACTIVE_STRATEGY = 'adaptive_ml') ===
-AML_UPDATE_INTERVAL = 50        # сделок до обновления онлайн-модели
-AML_CONF_THRESHOLD = 0.65       # порог уверенности для входа
-AML_MIN_MOVE_PCT = 0.35         # минимальное ожидаемое движение, %
-AML_KELLY_FRACTION = 0.25       # доля Kelly
-AML_MAX_LEVERAGE = 3.0          # макс. плечо для AML
-AML_MAX_SIZE_PCT = 0.15         # макс. размер позиции, доля от баланса
-AML_STOP_ATR_MULT = 2.0         # стоп = ATR × этот множитель
-AML_TAKE_ATR_MULT = 4.0         # тейк = ATR × этот множитель
-AML_MODEL_DIR = 'storage/models/adaptive'   # куда сохранять онлайн-модели
+# === ADAPTIVE ML ===
+AML_UPDATE_INTERVAL = 50
+AML_CONF_THRESHOLD = 0.65
+AML_MIN_MOVE_PCT = 0.35
+AML_KELLY_FRACTION = 0.25
+AML_MAX_LEVERAGE = 3.0
+AML_MAX_SIZE_PCT = 0.15
+AML_STOP_ATR_MULT = 2.0
+AML_TAKE_ATR_MULT = 4.0
+AML_MODEL_DIR = 'storage/models/adaptive'
 
-SCANNER_BLACKLIST = [
-    'WLD/USDT:USDT',
-    'LDO/USDT:USDT',
-    'ICP/USDT:USDT',
-    'DOT/USDT:USDT',
-    'VIRTUAL/USDT:USDT',
-    'ADA/USDT:USDT',
-]
-# ============================================
-# TRENDRIDER
-# ============================================
-TREND_TIMEFRAME          = '1h'     # TF, на котором считаются индикаторы TrendRider
+# === TRENDRIDER ===
+TREND_TIMEFRAME          = '1h'
 TREND_EMA_FAST           = 9
 TREND_EMA_SLOW           = 16
 TREND_RSI_PERIOD         = 14
@@ -231,6 +226,32 @@ TREND_RSI_BOUNCE         = 30
 TREND_RSI_EXIT           = 78
 TREND_ADX_THRESHOLD      = 25
 TREND_VOLUME_FACTOR      = 1.3
-TREND_MIN_CONF           = 5        # 0..10, порог для входа (bull)
-TREND_MIN_CONF_BEAR      = 6        # порог в bear-режиме
-TREND_BTC_CACHE_SEC      = 300      # кэш BTC-данных, сек
+TREND_MIN_CONF           = 5
+TREND_MIN_CONF_BEAR      = 6
+TREND_BTC_CACHE_SEC      = 300
+
+# === АВТОПОДБОР ПОД ДЕПОЗИТ ===
+DEPOSIT_AUTO_SCAN_ENABLED = True          # вкл/выкл автоподбор по депозиту
+DEPOSIT_AUTO_SCAN_HOURS = 1               # раз в час пересчитывать
+DEPOSIT_MIN_POSITION_PCT = 0.5            # минимальный размер позиции от free balance, %
+DEPOSIT_MAX_POSITIONS = 5                 # максимум монет в списке
+DEPOSIT_MIN_NOTIONAL_USD = 5.0            # минимальный notional на Bybit
+DEPOSIT_MIN_VOLUME_USD = 20_000_000       # минимальный объём 24ч, $
+DEPOSIT_MAX_ATR_PCT = 9.0                 # максимальная волатильность
+DEPOSIT_MIN_ATR_PCT = 5.0                 # минимальная волатильность
+DEPOSIT_USE_AUTOSCAN = False              # использовать step7_coin_scanner или свой список
+
+DEPOSIT_STATIC_CANDIDATES = [
+    'PENGU/USDT:USDT',
+    'APT/USDT:USDT',
+    'SUI/USDT:USDT',
+    'XRP/USDT:USDT',
+    '1000PEPE/USDT:USDT',
+    'WIF/USDT:USDT',
+    'ARB/USDT:USDT',
+    'OP/USDT:USDT',
+    'TIA/USDT:USDT',
+    'SEI/USDT:USDT',
+    'AVAX/USDT:USDT',
+    'INJ/USDT:USDT',
+]

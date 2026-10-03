@@ -7,10 +7,8 @@ TrendRider Strategy — порт с Freqtrade-стратегии darkvolg/trendr
   - MTF: 4h + 1d + BTC-сентимент (RSI и is_bull)
   - Стоп/тейк через ATR (передаём None — Trader посчитает сам)
 
-Что НЕ внутри:
-  - Early cut (2ч/4ч/8ч/16ч) — сделаем отдельно
-  - ROI-таблица — заменена на ATR-адаптив
-  - Protections — у проекта есть свой daily stop
+ДОБАВЛЕНО: метод evaluate_at() для бэктеста — работает БЕЗ сети,
+на переданном DataFrame. BTC/4h/1d контекст в бэктесте нейтральный.
 """
 
 from datetime import datetime, timezone, timedelta
@@ -40,11 +38,8 @@ class TrendRiderStrategy(StrategyBase):
         self.min_conf = getattr(config, 'TREND_MIN_CONF', 5)
         self.min_conf_bear = getattr(config, 'TREND_MIN_CONF_BEAR', 6)
 
-        # Кэш BTC-сентимента (общий для всех символов)
         self._btc_cache = {'ts': None, 'rsi': 50.0, 'is_bull': 1}
-
-        # Кэш 4h/1d для символов (обновляется по мере надобности)
-        self._mtf_cache = {}  # {symbol: {'ts', 'is_bull_4h', 'rsi_4h', 'adx_4h', 'ema200_1d'}}
+        self._mtf_cache = {}
 
     # ============================================================
     # СВЕЧИ
@@ -56,7 +51,7 @@ class TrendRiderStrategy(StrategyBase):
         return df
 
     # ============================================================
-    # ИНДИКАТОРЫ (pandas, без TA-Lib)
+    # ИНДИКАТОРЫ
     # ============================================================
     @staticmethod
     def _ema(s, period):
@@ -80,7 +75,6 @@ class TrendRiderStrategy(StrategyBase):
 
     @staticmethod
     def _adx(df, period=14):
-        # Упрощённый ADX через DI
         up = df['high'].diff()
         down = -df['low'].diff()
         plus_dm = np.where((up > down) & (up > 0), up, 0.0)
@@ -116,7 +110,7 @@ class TrendRiderStrategy(StrategyBase):
         return m + std * s, m, m - std * s
 
     # ============================================================
-    # BTC SENTIMENT (кэш 5 мин)
+    # BTC SENTIMENT (LIVE ONLY)
     # ============================================================
     def _btc_sentiment(self):
         now = datetime.now(timezone.utc)
@@ -149,11 +143,10 @@ class TrendRiderStrategy(StrategyBase):
         return self._btc_cache['rsi'], self._btc_cache['is_bull']
 
     # ============================================================
-    # MTF: 4h (is_bull, rsi, adx) + 1d (ema200)
+    # MTF (LIVE ONLY)
     # ============================================================
     def _mtf_context(self, symbol):
         try:
-            # 4h
             df4 = self._fetch(symbol, '4h', 210)
             if len(df4) < 60:
                 is_bull_4h, rsi_4h, adx_4h = 0, 50.0, 0.0
@@ -166,7 +159,6 @@ class TrendRiderStrategy(StrategyBase):
                 adx_4h, _, _ = self._adx(df4, 14)
                 adx_4h = adx_4h.iloc[-1]
 
-            # 1d
             df1 = self._fetch(symbol, '1d', 210)
             if len(df1) < 200:
                 ema200_1d = 0.0
@@ -195,7 +187,7 @@ class TrendRiderStrategy(StrategyBase):
         ema200 = self._ema(close, 200)
 
         rsi = self._rsi(close, self.rsi_period)
-        rsi_series = self._rsi(close, self.rsi_period)  # для shift()
+        rsi_series = self._rsi(close, self.rsi_period)
         adx, plus_di, minus_di = self._adx(df, 14)
         macd, macd_sig, macd_hist = self._macd(close)
         bb_u, bb_m, bb_l = self._bb(close, 20, 2.0)
@@ -203,7 +195,6 @@ class TrendRiderStrategy(StrategyBase):
         vol_ema = self._ema(df['volume'], 20)
         vol_ratio = df['volume'] / vol_ema.replace(0, np.nan)
 
-        # OBV
         obv = (np.sign(close.diff()).fillna(0) * df['volume']).cumsum()
         obv_ema = self._ema(obv, 20)
 
@@ -214,7 +205,6 @@ class TrendRiderStrategy(StrategyBase):
         is_bull = ((close > ema200) & (ema50 > ema200)).astype(int)
         is_bear = ((close < ema200) & (ema50 < ema200)).astype(int)
 
-        # pullback / ema50 bounce
         pullback_to_ema = (
             (df['low'] <= ema_s * 1.02) &
             (close > ema_s) &
@@ -274,7 +264,6 @@ class TrendRiderStrategy(StrategyBase):
             'ema_cross_up': int(ema_cross_up.iloc[-1]),
             'macd_hist_cross_up': int(macd_hist_cross_up.iloc[-1]),
         }
-        # NaN → 0/50 для безопасности
         for k, v in last.items():
             if isinstance(v, float) and np.isnan(v):
                 last[k] = 0.0
@@ -303,7 +292,6 @@ class TrendRiderStrategy(StrategyBase):
 
         found = []
 
-        # 1. trend_pullback
         if (is_bull == 1
             and m['pullback_to_ema'] == 1
             and self.rsi_pl < rsi < self.rsi_ph
@@ -316,7 +304,6 @@ class TrendRiderStrategy(StrategyBase):
             and (ctx['ema200_1d'] == 0 or close > ctx['ema200_1d'])):
             found.append('trend_pullback')
 
-        # 2. ema50_bounce
         if (is_bull == 1
             and m['ema50_bounce'] == 1
             and 30 < rsi < 50
@@ -326,7 +313,6 @@ class TrendRiderStrategy(StrategyBase):
             and btc_rsi > 35):
             found.append('ema50_bounce')
 
-        # 3. rsi_bounce
         if (close > ema200
             and m['rsi_prev'] < self.rsi_bounce
             and rsi > self.rsi_bounce
@@ -337,7 +323,6 @@ class TrendRiderStrategy(StrategyBase):
             and btc_rsi > 35):
             found.append('rsi_bounce')
 
-        # 4. ema_crossover
         if (ema_cross_up == 1
             and 40 < rsi < 75
             and close > ema200
@@ -345,7 +330,6 @@ class TrendRiderStrategy(StrategyBase):
             and btc_rsi > 35):
             found.append('ema_crossover')
 
-        # 5. bb_bounce
         if (bb_l > 0 and close <= bb_l * 1.005
             and close > m['open']
             and rsi < 45
@@ -354,7 +338,6 @@ class TrendRiderStrategy(StrategyBase):
             and btc_rsi > 35):
             found.append('bb_bounce')
 
-        # 6. macd_reversal
         if (macd_cross == 1
             and close > m['ema50']
             and close > ema200
@@ -418,9 +401,8 @@ class TrendRiderStrategy(StrategyBase):
         if (plus_di - minus_di) > 10:
             score += 1.0
 
-        # FNG/funding — заглушки как в оригинале
-        score += 1.0  # FNG neutral
-        score += 1.0  # healthy funding
+        score += 1.0
+        score += 1.0
 
         numeric = max(1, min(10, round(score * 10 / 17.5)))
 
@@ -436,7 +418,7 @@ class TrendRiderStrategy(StrategyBase):
         return numeric, level
 
     # ============================================================
-    # ГЛАВНЫЙ МЕТОД
+    # ГЛАВНЫЙ МЕТОД (LIVE)
     # ============================================================
     def check_symbol(self, symbol, free_balance):
         try:
@@ -463,7 +445,6 @@ class TrendRiderStrategy(StrategyBase):
 
         numeric, level = self._confidence(m, ctx, btc_rsi)
 
-        # решаем режим
         adx = m['adx']
         close = m['close']
         ema200 = m['ema200']
@@ -488,9 +469,8 @@ class TrendRiderStrategy(StrategyBase):
 
         atr_pct = (m['atr'] / m['close']) * 100 if m['close'] else 0.0
 
-        # Отдаём стоп/тейк через ATR (Trader посчитает точно так же, как для classic)
         return Signal(
-            direction='LONG',   # TrendRider — только long
+            direction='LONG',
             confidence=numeric / 10.0,
             stop_pct=None,
             take_pct=None,
@@ -505,7 +485,82 @@ class TrendRiderStrategy(StrategyBase):
                 'confidence_score': numeric,
                 'confidence_level': level,
                 'regime': regime,
-                'level_price': 0,       # нет уровней у этой стратегии
+                'level_price': 0,
+                'touches': 0,
+                'trend': 'UP' if is_bull else 'DOWN',
+                'distance_to_level_pct': 0,
+            },
+        )
+
+    # ============================================================
+    # BACKTEST-РЕЖИМ
+    # ============================================================
+    def evaluate_at(self, df_1h, idx):
+        """
+        Оценивает сигнал TrendRider на свече idx.
+        Работает БЕЗ сети — использует только df_1h.
+
+        Упрощения (в бэктесте):
+          - BTC-сентимент: нейтральный (rsi=50, is_bull=1)
+          - 4h/1d контекст: пустой (ema200_1d=0)
+        """
+        if idx < 210 or idx >= len(df_1h):
+            return None
+
+        df = df_1h.iloc[:idx + 1].copy()
+        if len(df) < 210:
+            return None
+
+        try:
+            m = self._compute_indicators(df)
+        except Exception:
+            return None
+
+        ctx = {'is_bull_4h': 0, 'rsi_4h': 50.0, 'adx_4h': 0.0, 'ema200_1d': 0.0}
+        btc_rsi, btc_bull = 50.0, 1
+
+        sigs = self._signals(m, ctx, btc_rsi, btc_bull)
+        if not sigs:
+            return None
+
+        numeric, level = self._confidence(m, ctx, btc_rsi)
+
+        adx = m['adx']
+        close = m['close']
+        ema200 = m['ema200']
+        is_bull = m['is_bull']
+        if adx < 20:
+            regime = "RANGING"
+            min_conf = self.min_conf
+        elif is_bull and close > ema200:
+            regime = "BULL"
+            min_conf = self.min_conf
+        else:
+            regime = "BEAR"
+            min_conf = self.min_conf_bear
+
+        if numeric < min_conf:
+            return None
+
+        atr_pct = (m['atr'] / m['close']) * 100 if m['close'] else 0.0
+
+        return Signal(
+            direction='LONG',
+            confidence=numeric / 10.0,
+            stop_pct=None,
+            take_pct=None,
+            leverage=None,
+            size_usd=None,
+            reason=f"TR[{','.join(sigs)}] {level} {numeric}/10",
+            meta={
+                'signal_type': 'TrendRider',
+                'signal_name': ','.join(sigs),
+                'atr_pct': atr_pct,
+                'price': m['close'],
+                'confidence_score': numeric,
+                'confidence_level': level,
+                'regime': regime,
+                'level_price': 0,
                 'touches': 0,
                 'trend': 'UP' if is_bull else 'DOWN',
                 'distance_to_level_pct': 0,

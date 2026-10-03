@@ -8,9 +8,10 @@ signal_logger.py — Логирование всех сигналов (сраб�
   - opened (True/False), reason (если не открыт)
   - результат сделки (заполняется post-factum)
 
-Использование:
-    from signal_logger import log_signal, log_trade_result, load_signals
-    log_signal({...})
+ИСПРАВЛЕНИЯ:
+  - log_trade_result: окно поиска расширено с 5 до 15 минут,
+    т.к. между сигналом и фактическим открытием позиции может пройти
+    больше времени (сетевые задержки, ожидание ордера).
 """
 import os
 import json
@@ -21,6 +22,7 @@ from threading import Lock
 SIGNALS_FILE = "signals_log.json"
 LOCK = Lock()
 MAX_SIGNALS = 5000
+MATCH_WINDOW_SEC = 15 * 60   # 15 минут вместо 5
 
 
 def _load_raw():
@@ -87,7 +89,7 @@ def log_trade_result(symbol, entry_ts, exit_ts, pnl_pct, pnl_usd,
                      duration_h, result="TAKE", reason="closed"):
     """
     Обновляет результат сделки в последнем подходящем сигнале.
-    Ищет сигнал по symbol и entry_ts (с допуском ±5 мин).
+    Ищет сигнал по symbol и entry_ts в окне ±15 минут.
     """
     from datetime import datetime as _dt
 
@@ -99,7 +101,6 @@ def log_trade_result(symbol, entry_ts, exit_ts, pnl_pct, pnl_usd,
             return False
 
         updated = False
-        # Ищем в обратном порядке — от свежих к старым
         for i in range(len(data) - 1, -1, -1):
             sig = data[i]
             if sig.get("symbol") != symbol:
@@ -111,7 +112,7 @@ def log_trade_result(symbol, entry_ts, exit_ts, pnl_pct, pnl_usd,
             except Exception:
                 continue
             diff_sec = abs((target - sig_ts).total_seconds())
-            if diff_sec > 300:
+            if diff_sec > MATCH_WINDOW_SEC:
                 continue
 
             sig["result"] = result

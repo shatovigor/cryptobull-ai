@@ -1,0 +1,17 @@
+# CryptoBullAI — зависимости
+
+# === Основные ===
+ccxt>=4.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# === GUI ===
+PyQt6>=6.5.0
+pyqtgraph>=0.13.0
+
+# === ML (для adaptive_ml) ===
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# === Работа с окружением ===
+python-dotenv>=1.0.0
