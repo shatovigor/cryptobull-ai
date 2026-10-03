@@ -68,3 +68,16 @@ Thumbs.db
 outputs/
 logs/
 evaluation_output/
+
+
+# === Одноразовые скрипты (дополнительно) ===
+diag.py
+test_import.py
+check_state.py
+check_gui.py
+check_problem_coins.py
+fix_gui.py
+restore_best.py
+apply_gui_advisor_patch.py
+create_gui_structure.py
+smoke_test.py
